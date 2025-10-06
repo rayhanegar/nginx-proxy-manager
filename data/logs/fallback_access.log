@@ -1,0 +1,2 @@
+[05/Oct/2025:16:46:06 +0000] 200 - GET http devsecops "/" [Client 192.168.50.200] [Length 568] [Gzip 1.86] "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:143.0) Gecko/20100101 Firefox/143.0" "-"
+[05/Oct/2025:16:46:06 +0000] 400 - GET http devsecops "/favicon.ico" [Client 127.0.0.1] [Length 230] [Gzip -] "-" "-"
