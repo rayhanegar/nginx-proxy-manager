@@ -1,141 +1,331 @@
-# Nginx Proxy Manager Setup
+# Konfigurasi Nginx Proxy Manager
 
-This repository contains a Docker Compose setup for Nginx Proxy Manager, a web-based nginx proxy management tool.
+Repositori ini berisi konfigurasi Docker Compose untuk Nginx Proxy Manager, sebuah aplikasi berbasis web untuk manajemen reverse proxy nginx.
 
-## ⚠️ Security Notice
+## ⚠️ Pemberitahuan Keamanan
 
-This repository has been configured for public sharing. All sensitive data has been removed including:
+Repositori ini telah dikonfigurasi untuk berbagi publik. Seluruh data sensitif telah dihapus, meliputi:
 
-- Environment files (`.env`)
-- Database data (`mysql/`)
-- Application data (`data/`)
-- SSL certificates and keys
-- Log files
-- Backup files
+- Berkas environment (`.env`)
+- Data basis data (`mysql/`)
+- Data aplikasi (`data/`)
+- Sertifikat dan kunci SSL
+- Berkas log
+- Berkas cadangan
 
-## Setup Instructions
+## Arsitektur Sistem
 
-### 1. Clone the Repository
+### Gambaran Umum Arsitektur
+
+Sistem ini dibangun menggunakan arsitektur kontainer Docker dengan komponen-komponen yang terisolasi namun saling berkomunikasi melalui jaringan virtual yang terdefinisi. Arsitektur ini mengimplementasikan prinsip separation of concerns dengan memisahkan layanan reverse proxy dari layanan basis data.
+
+### Topologi Jaringan
+
+Sistem menggunakan dua jaringan Docker yang terisolasi:
+
+#### 1. Jaringan `proxy-network` (Eksternal)
+- **Tipe Driver:** Bridge
+- **Subnet:** 172.20.0.0/16
+- **Gateway:** 172.20.0.1
+- **Fungsi:** Jaringan bersama untuk komunikasi antar layanan yang memerlukan akses reverse proxy
+- **Label:** 
+  - `com.devsecops.description`: "Shared network for reverse proxy"
+  - `com.devsecops.managed-by`: "nginx-proxy-manager"
+
+#### 2. Jaringan `npm-internal` (Internal)
+- **Tipe Driver:** Bridge
+- **Fungsi:** Jaringan privat untuk komunikasi internal antara Nginx Proxy Manager dan basis data
+- **Keamanan:** Terisolasi dari jaringan eksternal untuk meningkatkan keamanan basis data
+
+### Diagram Arsitektur
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Host System                           │
+│                                                               │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │         proxy-network (172.20.0.0/16)                │   │
+│  │                                                       │   │
+│  │  ┌─────────────────────────────────────────┐        │   │
+│  │  │  nginx-proxy-manager (172.20.0.10)      │        │   │
+│  │  │  - Port 80:80   (HTTP)                  │        │   │
+│  │  │  - Port 81:81   (Admin UI)              │        │   │
+│  │  │  - Port 443:443 (HTTPS)                 │        │   │
+│  │  └──────────────┬──────────────────────────┘        │   │
+│  │                 │                                     │   │
+│  └─────────────────┼─────────────────────────────────────┘   │
+│                    │                                         │
+│  ┌─────────────────┼─────────────────────────────────────┐   │
+│  │                 │    npm-internal                      │   │
+│  │                 │                                      │   │
+│  │                 ▼                                      │   │
+│  │  ┌─────────────────────────────────────────┐         │   │
+│  │  │  npm-db (MariaDB)                       │         │   │
+│  │  │  - Port 3306 (Internal only)            │         │   │
+│  │  └─────────────────────────────────────────┘         │   │
+│  │                                                        │   │
+│  └────────────────────────────────────────────────────────┘   │
+│                                                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Spesifikasi Layanan
+
+### 1. Layanan nginx-proxy-manager
+
+**Image Docker:** `jc21/nginx-proxy-manager:latest`
+
+**Fungsi:** Menyediakan antarmuka web untuk manajemen reverse proxy nginx, termasuk konfigurasi SSL/TLS otomatis menggunakan Let's Encrypt.
+
+**Konfigurasi Jaringan:**
+- **IP Address Statis:** 172.20.0.10 pada jaringan `proxy-network`
+- **Port Mapping:**
+  - `80:80` - HTTP traffic untuk proxy
+  - `81:81` - Antarmuka administrasi web
+  - `443:443` - HTTPS traffic untuk proxy
+
+**Variabel Lingkungan:**
+- `DB_SQLITE_FILE=""` - Menonaktifkan SQLite, memaksa penggunaan MySQL
+- `DB_MYSQL_HOST="npm-db"` - Hostname layanan basis data
+- `DB_MYSQL_PORT=3306` - Port koneksi MySQL
+- `DB_MYSQL_USER="npm"` - Username basis data
+- `DB_MYSQL_PASSWORD` - Password basis data (dari variabel environment)
+- `DB_MYSQL_NAME="npm"` - Nama basis data
+- `DISABLE_IPV6='true'` - Menonaktifkan dukungan IPv6
+
+**Volume Mounts:**
+- `./data:/data` - Penyimpanan konfigurasi aplikasi dan log
+- `./letsencrypt:/etc/letsencrypt` - Penyimpanan sertifikat SSL
+
+**Health Check:**
+- Perintah: `/bin/check-health`
+- Interval: 10 detik
+- Timeout: 3 detik
+- Retries: 3 kali
+
+### 2. Layanan npm-db
+
+**Image Docker:** `jc21/mariadb-aria:latest`
+
+**Fungsi:** Menyediakan basis data MariaDB dengan storage engine Aria untuk menyimpan konfigurasi Nginx Proxy Manager.
+
+**Konfigurasi Jaringan:**
+- **Jaringan:** npm-internal (tanpa IP statis)
+- **Port:** 3306 (hanya dapat diakses dari jaringan internal)
+
+**Variabel Lingkungan:**
+- `MYSQL_ROOT_PASSWORD` - Password root MySQL (dari variabel environment)
+- `MYSQL_DATABASE='npm'` - Nama basis data yang akan dibuat
+- `MYSQL_USER='npm'` - Username aplikasi
+- `MYSQL_PASSWORD` - Password aplikasi (dari variabel environment)
+- `MARIADB_AUTO_UPGRADE='1'` - Mengaktifkan upgrade otomatis skema basis data
+
+**Volume Mounts:**
+- `./mysql:/var/lib/mysql` - Penyimpanan persisten data basis data
+
+**Health Check:**
+- Perintah: `mysqladmin ping`
+- Interval: 10 detik
+- Timeout: 5 detik
+- Retries: 5 kali
+
+## Alokasi Alamat IP pada proxy-network
+
+| Layanan | Alamat IP | Fungsi |
+|---------|-----------|--------|
+| Gateway | 172.20.0.1 | Gateway jaringan Docker |
+| nginx-proxy-manager | 172.20.0.10 | Reverse proxy server (IP statis) |
+| Range Tersedia | 172.20.0.2-172.20.255.254 | Tersedia untuk layanan lain yang memerlukan akses proxy |
+
+**Catatan:** Penggunaan alamat IP statis untuk nginx-proxy-manager memastikan konsistensi konfigurasi dan memudahkan referensi dari layanan lain dalam jaringan yang sama.
+
+## Instruksi Instalasi
+
+### 1. Kloning Repositori
 
 ```bash
-git clone <your-repo-url>
+git clone <url-repositori-anda>
 cd nginx-proxy-manager
 ```
 
-### 2. Create Environment File
+### 2. Pembuatan Berkas Environment
 
-Create a `.env` file in the root directory with your own secure credentials:
+Buat berkas `.env` di direktori root dengan kredensial yang aman:
 
 ```bash
 # .env
-NPM_DB_PASSWORD=your-secure-database-password
-NPM_ROOT_PASSWORD=your-secure-npm-admin-password
+NPM_DB_PASSWORD=password-basis-data-yang-aman
+NPM_ROOT_PASSWORD=password-root-mysql-yang-aman
 ```
 
-**Important:** Use strong, unique passwords. Never commit the `.env` file to version control.
+**Penting:** Gunakan password yang kuat dan unik. Jangan pernah melakukan commit berkas `.env` ke version control.
 
-### 3. Directory Structure
+### 3. Struktur Direktori
 
-The following directories will be created automatically when you run the containers:
+Direktori-direktori berikut akan dibuat secara otomatis saat kontainer dijalankan:
 
-- `data/` - Contains Nginx Proxy Manager application data, configurations, and logs
-- `mysql/` - Contains MySQL database data
-- `letsencrypt/` - Contains SSL certificates (if using Let's Encrypt)
+- `data/` - Berisi data aplikasi, konfigurasi, dan log Nginx Proxy Manager
+- `mysql/` - Berisi data basis data MySQL/MariaDB
+- `letsencrypt/` - Berisi sertifikat SSL (jika menggunakan Let's Encrypt)
 
-### 4. Start the Services
+### 4. Menjalankan Layanan
 
 ```bash
 docker-compose up -d
 ```
 
-### 5. Access the Web Interface
+Perintah ini akan:
+1. Membuat jaringan `proxy-network` dan `npm-internal`
+2. Menjalankan kontainer `npm-db` terlebih dahulu
+3. Menunggu hingga basis data sehat (healthy)
+4. Menjalankan kontainer `nginx-proxy-manager`
 
-Open your browser and navigate to:
-- **HTTP:** `http://your-server-ip:81`
-- **HTTPS:** `https://your-server-ip:443` (after SSL setup)
+### 5. Mengakses Antarmuka Web
 
-### Default Login Credentials
+Buka browser dan navigasi ke:
+- **HTTP:** `http://ip-server-anda:81`
+- **HTTPS:** `https://ip-server-anda:443` (setelah konfigurasi SSL)
 
-On first run, use these default credentials (change immediately after login):
+### Kredensial Login Awal
+
+Pada penggunaan pertama, gunakan kredensial default berikut (segera ubah setelah login):
 - **Email:** `admin@example.com`
 - **Password:** `changeme`
 
-## Configuration
+## Konfigurasi Lanjutan
 
-### Docker Compose
+### Modifikasi Docker Compose
 
-The `docker-compose.yml` file includes:
-- Nginx Proxy Manager web interface
-- MySQL database
-- Persistent volume mounts for data and database
+Berkas `docker-compose.yml` dapat disesuaikan untuk kebutuhan spesifik dengan mempertimbangkan:
+1. Penyesuaian mapping port jika terjadi konflik
+2. Penambahan variabel lingkungan sesuai kebutuhan
+3. Modifikasi konfigurasi jaringan untuk integrasi dengan layanan lain
 
-### Customization
+### Integrasi dengan Layanan Lain
 
-You can customize the setup by:
-1. Modifying `docker-compose.yml` for your specific needs
-2. Adjusting port mappings if needed
-3. Setting up additional environment variables
+Untuk mengintegrasikan layanan lain dengan reverse proxy:
 
-## Backup and Restore
+```yaml
+services:
+  layanan-anda:
+    image: image-anda:latest
+    networks:
+      - proxy-network
+    # Konfigurasi lainnya...
 
-### Backup
-
-To backup your configuration:
-
-```bash
-# Backup application data
-sudo tar -czf npm-data-backup.tar.gz data/
-
-# Backup database
-docker-compose exec db mysqldump -u npm -p npm > npm-database-backup.sql
+networks:
+  proxy-network:
+    external: true
+    name: proxy-network
 ```
 
-### Restore
+## Prosedur Backup dan Restore
 
-To restore from backup:
+### Prosedur Backup
+
+Untuk melakukan backup konfigurasi sistem:
 
 ```bash
-# Restore application data
-sudo tar -xzf npm-data-backup.tar.gz
+# Backup data aplikasi
+sudo tar -czf npm-data-backup-$(date +%Y%m%d).tar.gz data/
 
-# Restore database
-docker-compose exec -T db mysql -u npm -p npm < npm-database-backup.sql
+# Backup basis data
+docker-compose exec npm-db mysqldump -u npm -p"${NPM_DB_PASSWORD}" npm > npm-database-backup-$(date +%Y%m%d).sql
 ```
 
-## Security Best Practices
+### Prosedur Restore
 
-1. **Change Default Credentials:** Always change the default admin credentials on first login
-2. **Use Strong Passwords:** Set strong passwords in your `.env` file
-3. **Keep Updated:** Regularly update the Docker images
-4. **Firewall:** Configure firewall rules to restrict access as needed
-5. **SSL Certificates:** Use SSL certificates for all proxy hosts
-6. **Regular Backups:** Maintain regular backups of your configuration and data
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Port Conflicts:** Ensure ports 80, 81, and 443 are not used by other services
-2. **Permission Issues:** The `data/` and `mysql/` directories may need proper permissions
-3. **Database Connection:** Check that the MySQL container is running and credentials are correct
-
-### Logs
-
-Check container logs:
+Untuk melakukan restore dari backup:
 
 ```bash
-# All services
+# Restore data aplikasi
+sudo tar -xzf npm-data-backup-YYYYMMDD.tar.gz
+
+# Restore basis data
+docker-compose exec -T npm-db mysql -u npm -p"${NPM_DB_PASSWORD}" npm < npm-database-backup-YYYYMMDD.sql
+```
+
+## Praktik Keamanan Terbaik
+
+1. **Perubahan Kredensial Default:** Segera ubah kredensial admin default pada login pertama
+2. **Penggunaan Password Kuat:** Tetapkan password yang kuat dan kompleks dalam berkas `.env`
+3. **Pembaruan Berkala:** Lakukan pembaruan image Docker secara berkala untuk mendapatkan patch keamanan terbaru
+4. **Konfigurasi Firewall:** Konfigurasikan aturan firewall untuk membatasi akses sesuai kebutuhan
+5. **Implementasi SSL/TLS:** Gunakan sertifikat SSL untuk semua proxy host yang dikelola
+6. **Backup Berkala:** Lakukan backup konfigurasi dan data secara terjadwal dan teratur
+7. **Isolasi Jaringan:** Manfaatkan isolasi jaringan untuk memisahkan layanan internal dari eksternal
+8. **Monitoring Log:** Pantau log secara berkala untuk mendeteksi aktivitas mencurigakan
+
+## Pemecahan Masalah
+
+### Masalah Umum
+
+1. **Konflik Port:** Pastikan port 80, 81, dan 443 tidak digunakan oleh layanan lain di host system
+2. **Masalah Permission:** Direktori `data/` dan `mysql/` mungkin memerlukan permission yang sesuai
+3. **Koneksi Basis Data:** Verifikasi bahwa kontainer MySQL berjalan dan kredensial sudah benar
+4. **Masalah Jaringan:** Periksa apakah jaringan Docker sudah terbuat dengan benar
+
+### Pemeriksaan Log
+
+Periksa log kontainer untuk diagnosis masalah:
+
+```bash
+# Semua layanan
 docker-compose logs
 
-# Specific service
-docker-compose logs app
-docker-compose logs db
+# Layanan spesifik
+docker-compose logs nginx-proxy-manager
+docker-compose logs npm-db
+
+# Follow log secara real-time
+docker-compose logs -f nginx-proxy-manager
 ```
 
-## Contributing
+### Pemeriksaan Status Layanan
 
-If you find issues or have improvements, please feel free to submit a pull request or open an issue.
+```bash
+# Status kontainer
+docker-compose ps
 
-## License
+# Pemeriksaan health check
+docker inspect nginx-proxy-manager | grep -A 10 Health
 
-This setup is provided as-is for educational and practical use. Please ensure compliance with all relevant software licenses.
+# Pemeriksaan koneksi jaringan
+docker network inspect proxy-network
+docker network inspect npm-internal
+```
+
+## Monitoring dan Maintenance
+
+### Monitoring Performa
+
+Log akses dan error dapat ditemukan di direktori `data/logs/`:
+- `fallback_access.log` - Log akses untuk default host
+- `fallback_error.log` - Log error untuk default host
+- `proxy-host-*_access.log` - Log akses per proxy host
+- `proxy-host-*_error.log` - Log error per proxy host
+
+### Maintenance Berkala
+
+Lakukan maintenance berkala meliputi:
+1. Pemeriksaan penggunaan disk untuk direktori `data/` dan `mysql/`
+2. Rotasi log secara otomatis (sudah dikonfigurasi)
+3. Pembaruan image Docker
+4. Verifikasi backup
+
+```bash
+# Pembaruan image
+docker-compose pull
+docker-compose up -d
+
+# Pembersihan resource yang tidak digunakan
+docker system prune -a
+```
+
+## Kontribusi
+
+Kontribusi dalam bentuk issue report atau pull request sangat diterima. Pastikan untuk mengikuti praktik terbaik dalam pengembangan dan dokumentasi yang jelas untuk setiap perubahan yang diusulkan.
+
+## Lisensi
+
+Konfigurasi ini disediakan sebagaimana adanya untuk keperluan edukasi dan praktis. Pastikan kepatuhan terhadap semua lisensi perangkat lunak yang relevan yang digunakan dalam sistem ini.
